@@ -60,6 +60,8 @@
     "eslint": "^9.39.1",
     "prettier": "^3.7.1",
     "prisma": "7.10.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "supertest": "^7.1.4",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
