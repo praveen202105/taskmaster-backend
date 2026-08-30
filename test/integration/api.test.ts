@@ -66,10 +66,41 @@ describe("TaskMaster API", () => {
     expect(docs.body.openapi).toBe("3.1.0");
     expect(docs.body.paths["/api/v1/tasks"]).toBeDefined();
 
+    const swagger = await request(app).get("/docs/");
+    expect(swagger.status).toBe(200);
+
+    const requestId = await request(app).get("/api/v1/health/live").set("x-request-id", "test-id");
+    expect(requestId.headers["x-request-id"]).toBe("test-id");
+
+    const allowedOrigin = await request(app)
+      .get("/api/v1/health/live")
+      .set("Origin", "http://localhost:3000");
+    expect(allowedOrigin.headers["access-control-allow-origin"]).toBe("http://localhost:3000");
+
+    const deniedOrigin = await request(app)
+      .get("/api/v1/health/live")
+      .set("Origin", "https://untrusted.example");
+    expect(deniedOrigin.headers["access-control-allow-origin"]).toBeUndefined();
+
     const invalid = await request(app).post("/api/v1/auth/register").send({ email: "invalid" });
     expect(invalid.status).toBe(400);
     expect(invalid.body.error).toMatchObject({ code: "VALIDATION_ERROR" });
     expect(invalid.body.error.requestId).toBeTypeOf("string");
+
+    const invalidJson = await request(app)
+      .post("/api/v1/auth/login")
+      .set("content-type", "application/json")
+      .send('{"email":');
+    expect(invalidJson.status).toBe(400);
+    expect(invalidJson.body.error.code).toBe("INVALID_JSON");
+
+    const unauthenticated = await request(app).get("/api/v1/users/me");
+    expect(unauthenticated.status).toBe(401);
+
+    const invalidToken = await request(app)
+      .get("/api/v1/users/me")
+      .set("Authorization", "Bearer invalid-token");
+    expect(invalidToken.status).toBe(401);
 
     const missing = await request(app).get("/not-a-route");
     expect(missing.status).toBe(404);
@@ -81,6 +112,20 @@ describe("TaskMaster API", () => {
     const registered = await registerUser(agent, "Owner User", "  OWNER@EXAMPLE.COM ");
     expect(registered.user.email).toBe("owner@example.com");
 
+    const duplicate = await request(app).post("/api/v1/auth/register").send({
+      name: "Duplicate Owner",
+      email: "owner@example.com",
+      password: "A-strong-test-password!",
+    });
+    expect(duplicate.status).toBe(409);
+
+    const missingRefresh = await request(app).post("/api/v1/auth/refresh");
+    expect(missingRefresh.status).toBe(401);
+    const invalidRefresh = await request(app)
+      .post("/api/v1/auth/refresh")
+      .set("Cookie", "taskmaster_refresh=not-a-session");
+    expect(invalidRefresh.status).toBe(401);
+
     const profile = await agent.get("/api/v1/users/me").set(bearer(registered.accessToken));
     expect(profile.status).toBe(200);
     expect(profile.body.data.name).toBe("Owner User");
@@ -91,6 +136,12 @@ describe("TaskMaster API", () => {
       .send({ name: "Updated Owner", avatarUrl: "https://example.com/avatar.png" });
     expect(updated.status).toBe(200);
     expect(updated.body.data.name).toBe("Updated Owner");
+
+    const emptyProfile = await agent
+      .patch("/api/v1/users/me")
+      .set(bearer(registered.accessToken))
+      .send({});
+    expect(emptyProfile.status).toBe(400);
 
     const wrongLogin = await request(app).post("/api/v1/auth/login").send({
       email: "owner@example.com",
@@ -117,10 +168,175 @@ describe("TaskMaster API", () => {
       password: "A-strong-test-password!",
     });
     expect(loggedIn.status).toBe(200);
+
+    const wrongCurrentPassword = await agent
+      .patch("/api/v1/users/me/password")
+      .set(bearer(loggedIn.body.data.accessToken as string))
+      .send({
+        currentPassword: "wrong-password",
+        newPassword: "An-even-stronger-password!",
+      });
+    expect(wrongCurrentPassword.status).toBe(401);
+
+    const changedPassword = await agent
+      .patch("/api/v1/users/me/password")
+      .set(bearer(loggedIn.body.data.accessToken as string))
+      .send({
+        currentPassword: "A-strong-test-password!",
+        newPassword: "An-even-stronger-password!",
+      });
+    expect(changedPassword.status).toBe(204);
+
+    const revokedByPasswordChange = await agent.post("/api/v1/auth/refresh");
+    expect(revokedByPasswordChange.status).toBe(401);
+    const oldPassword = await request(app).post("/api/v1/auth/login").send({
+      email: "owner@example.com",
+      password: "A-strong-test-password!",
+    });
+    expect(oldPassword.status).toBe(401);
+    const newPassword = await agent.post("/api/v1/auth/login").send({
+      email: "owner@example.com",
+      password: "An-even-stronger-password!",
+    });
+    expect(newPassword.status).toBe(200);
+
     const logout = await agent.post("/api/v1/auth/logout");
     expect(logout.status).toBe(204);
     const refreshAfterLogout = await agent.post("/api/v1/auth/refresh");
     expect(refreshAfterLogout.status).toBe(401);
+  });
+
+  it("enforces team and project RBAC plus invitation state transitions", async () => {
+    const ownerAgent = request.agent(app);
+    const adminAgent = request.agent(app);
+    const memberAgent = request.agent(app);
+    const outsiderAgent = request.agent(app);
+    const owner = await registerUser(ownerAgent, "Owner", "owner@example.com");
+    const admin = await registerUser(adminAgent, "Admin", "admin@example.com");
+    const member = await registerUser(memberAgent, "Member", "member@example.com");
+    const outsider = await registerUser(outsiderAgent, "Outsider", "outsider@example.com");
+
+    const teamResponse = await ownerAgent
+      .post("/api/v1/teams")
+      .set(bearer(owner.accessToken))
+      .send({ name: "Core Platform" });
+    expect(teamResponse.status).toBe(201);
+    const teamId = teamResponse.body.data.id as string;
+
+    const teams = await ownerAgent.get("/api/v1/teams").set(bearer(owner.accessToken));
+    expect(teams.body.data[0].membership.role).toBe("OWNER");
+    const team = await ownerAgent.get(`/api/v1/teams/${teamId}`).set(bearer(owner.accessToken));
+    expect(team.status).toBe(200);
+    const outsiderTeam = await outsiderAgent
+      .get(`/api/v1/teams/${teamId}`)
+      .set(bearer(outsider.accessToken));
+    expect(outsiderTeam.status).toBe(403);
+
+    const adminInvitation = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(owner.accessToken))
+      .send({ email: admin.user.email, role: "ADMIN" });
+    expect(adminInvitation.status).toBe(201);
+    const acceptedAdmin = await adminAgent
+      .post(`/api/v1/invitations/${adminInvitation.body.data.id as string}/accept`)
+      .set(bearer(admin.accessToken));
+    expect(acceptedAdmin.status).toBe(200);
+
+    const adminCannotInviteAdmin = await adminAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(admin.accessToken))
+      .send({ email: outsider.user.email, role: "ADMIN" });
+    expect(adminCannotInviteAdmin.status).toBe(403);
+
+    const memberInvitation = await adminAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(admin.accessToken))
+      .send({ email: member.user.email, role: "MEMBER" });
+    expect(memberInvitation.status).toBe(201);
+    await memberAgent
+      .post(`/api/v1/invitations/${memberInvitation.body.data.id as string}/accept`)
+      .set(bearer(member.accessToken))
+      .expect(200);
+
+    const duplicateMemberInvitation = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(owner.accessToken))
+      .send({ email: member.user.email });
+    expect(duplicateMemberInvitation.status).toBe(409);
+
+    const outsiderInvitation = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(owner.accessToken))
+      .send({ email: outsider.user.email });
+    expect(outsiderInvitation.status).toBe(201);
+    const duplicatePending = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(owner.accessToken))
+      .send({ email: outsider.user.email });
+    expect(duplicatePending.status).toBe(409);
+    await outsiderAgent
+      .post(`/api/v1/invitations/${outsiderInvitation.body.data.id as string}/decline`)
+      .set(bearer(outsider.accessToken))
+      .expect(204);
+    const acceptDeclined = await outsiderAgent
+      .post(`/api/v1/invitations/${outsiderInvitation.body.data.id as string}/accept`)
+      .set(bearer(outsider.accessToken));
+    expect(acceptDeclined.status).toBe(409);
+
+    const memberCannotUpdateTeam = await memberAgent
+      .patch(`/api/v1/teams/${teamId}`)
+      .set(bearer(member.accessToken))
+      .send({ name: "Unauthorized rename" });
+    expect(memberCannotUpdateTeam.status).toBe(403);
+    const updatedTeam = await adminAgent
+      .patch(`/api/v1/teams/${teamId}`)
+      .set(bearer(admin.accessToken))
+      .send({ name: "Updated Platform" });
+    expect(updatedTeam.status).toBe(200);
+
+    const projectResponse = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/projects`)
+      .set(bearer(owner.accessToken))
+      .send({ name: "API Delivery" });
+    expect(projectResponse.status).toBe(201);
+    const projectId = projectResponse.body.data.id as string;
+    const projects = await memberAgent
+      .get(`/api/v1/teams/${teamId}/projects`)
+      .set(bearer(member.accessToken));
+    expect(projects.body.data).toHaveLength(1);
+    await memberAgent
+      .get(`/api/v1/projects/${projectId}`)
+      .set(bearer(member.accessToken))
+      .expect(200);
+    const memberCannotCreateProject = await memberAgent
+      .post(`/api/v1/teams/${teamId}/projects`)
+      .set(bearer(member.accessToken))
+      .send({ name: "Unauthorized project" });
+    expect(memberCannotCreateProject.status).toBe(403);
+    const updatedProject = await adminAgent
+      .patch(`/api/v1/projects/${projectId}`)
+      .set(bearer(admin.accessToken))
+      .send({ description: "Managed by the admin" });
+    expect(updatedProject.status).toBe(200);
+
+    const members = await memberAgent
+      .get(`/api/v1/teams/${teamId}/members`)
+      .set(bearer(member.accessToken));
+    expect(members.body.data).toHaveLength(3);
+    const cannotRemoveOwner = await memberAgent
+      .delete(`/api/v1/teams/${teamId}/members/${owner.user.id}`)
+      .set(bearer(member.accessToken));
+    expect(cannotRemoveOwner.status).toBe(403);
+
+    await adminAgent
+      .delete(`/api/v1/projects/${projectId}`)
+      .set(bearer(admin.accessToken))
+      .expect(204);
+    const memberCannotDeleteTeam = await memberAgent
+      .delete(`/api/v1/teams/${teamId}`)
+      .set(bearer(member.accessToken));
+    expect(memberCannotDeleteTeam.status).toBe(403);
+    await ownerAgent.delete(`/api/v1/teams/${teamId}`).set(bearer(owner.accessToken)).expect(204);
   });
 
   it("supports teams, invitations, projects, assigned tasks, comments, and attachments", async () => {
@@ -183,6 +399,25 @@ describe("TaskMaster API", () => {
     expect(assignedTasks.body.data).toHaveLength(1);
     expect(assignedTasks.body.meta.total).toBe(1);
 
+    const projectTasks = await ownerAgent
+      .get("/api/v1/tasks")
+      .query({ projectId, sortBy: "title", order: "asc", page: 1, limit: 5 })
+      .set(bearer(owner.accessToken));
+    expect(projectTasks.body.data).toHaveLength(1);
+    await ownerAgent.get(`/api/v1/tasks/${taskId}`).set(bearer(owner.accessToken)).expect(200);
+
+    const invalidAssignee = await ownerAgent
+      .patch(`/api/v1/tasks/${taskId}`)
+      .set(bearer(owner.accessToken))
+      .send({ assigneeId: outsider.user.id });
+    expect(invalidAssignee.status).toBe(403);
+
+    const updatedTask = await ownerAgent
+      .patch(`/api/v1/tasks/${taskId}`)
+      .set(bearer(owner.accessToken))
+      .send({ dueDate: "2026-09-20T10:00:00+05:30", priority: "MEDIUM" });
+    expect(updatedTask.status).toBe(200);
+
     const completed = await memberAgent
       .patch(`/api/v1/tasks/${taskId}`)
       .set(bearer(member.accessToken))
@@ -209,6 +444,11 @@ describe("TaskMaster API", () => {
       .send({ body: "Security controls look good." });
     expect(commentResponse.status).toBe(201);
     const commentId = commentResponse.body.data.id as string;
+    const updatedComment = await memberAgent
+      .patch(`/api/v1/comments/${commentId}`)
+      .set(bearer(member.accessToken))
+      .send({ body: "Security controls and audit evidence look good." });
+    expect(updatedComment.status).toBe(200);
     const commentList = await ownerAgent
       .get(`/api/v1/tasks/${taskId}/comments`)
       .set(bearer(owner.accessToken));
@@ -217,6 +457,37 @@ describe("TaskMaster API", () => {
       .delete(`/api/v1/comments/${commentId}`)
       .set(bearer(owner.accessToken));
     expect(ownerDeleteComment.status).toBe(204);
+
+    const ownerComment = await ownerAgent
+      .post(`/api/v1/tasks/${taskId}/comments`)
+      .set(bearer(owner.accessToken))
+      .send({ body: "Owner-only release note" });
+    const forbiddenCommentEdit = await memberAgent
+      .patch(`/api/v1/comments/${ownerComment.body.data.id as string}`)
+      .set(bearer(member.accessToken))
+      .send({ body: "Unauthorized edit" });
+    expect(forbiddenCommentEdit.status).toBe(403);
+    const forbiddenCommentDelete = await memberAgent
+      .delete(`/api/v1/comments/${ownerComment.body.data.id as string}`)
+      .set(bearer(member.accessToken));
+    expect(forbiddenCommentDelete.status).toBe(403);
+    await ownerAgent
+      .delete(`/api/v1/comments/${ownerComment.body.data.id as string}`)
+      .set(bearer(owner.accessToken))
+      .expect(204);
+
+    const missingAttachment = await memberAgent
+      .post(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(member.accessToken));
+    expect(missingAttachment.status).toBe(400);
+    const unsupportedAttachment = await memberAgent
+      .post(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(member.accessToken))
+      .attach("file", Buffer.from([0, 1, 2, 3]), {
+        filename: "payload.bin",
+        contentType: "application/octet-stream",
+      });
+    expect(unsupportedAttachment.status).toBe(415);
 
     const attachmentResponse = await memberAgent
       .post(`/api/v1/tasks/${taskId}/attachments`)
@@ -227,6 +498,11 @@ describe("TaskMaster API", () => {
       });
     expect(attachmentResponse.status).toBe(201);
     const attachmentId = attachmentResponse.body.data.id as string;
+
+    const attachmentList = await ownerAgent
+      .get(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(owner.accessToken));
+    expect(attachmentList.body.data).toHaveLength(1);
 
     const attachmentDownload = await ownerAgent
       .get(`/api/v1/attachments/${attachmentId}/content`)
@@ -244,6 +520,11 @@ describe("TaskMaster API", () => {
       .set(bearer(owner.accessToken));
     expect(deleteAttachment.status).toBe(204);
 
+    const deletedAttachment = await ownerAgent
+      .get(`/api/v1/attachments/${attachmentId}/content`)
+      .set(bearer(owner.accessToken));
+    expect(deletedAttachment.status).toBe(404);
+
     const removeMember = await ownerAgent
       .delete(`/api/v1/teams/${teamId}/members/${member.user.id}`)
       .set(bearer(owner.accessToken));
@@ -252,5 +533,7 @@ describe("TaskMaster API", () => {
       .get(`/api/v1/tasks/${taskId}`)
       .set(bearer(owner.accessToken));
     expect(taskAfterRemoval.body.data.assignee).toBeNull();
+
+    await ownerAgent.delete(`/api/v1/tasks/${taskId}`).set(bearer(owner.accessToken)).expect(204);
   });
 });
