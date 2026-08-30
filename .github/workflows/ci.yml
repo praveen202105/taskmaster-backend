@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/taskmaster-production-api]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: taskmaster_test
+          POSTGRES_USER: taskmaster
+          POSTGRES_PASSWORD: taskmaster
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taskmaster -d taskmaster_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://taskmaster:taskmaster@127.0.0.1:5432/taskmaster_test?schema=public
+      JWT_ACCESS_SECRET: ci-secret-that-is-longer-than-thirty-two-characters
+      UPLOAD_DIR: ./tmp/test-uploads
+      LOG_LEVEL: error
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npx prisma validate
+      - run: npm run db:migrate:deploy
+      - run: npm run test:coverage
+      - run: npm run build
+      - run: docker build --tag taskmaster-backend:ci .
