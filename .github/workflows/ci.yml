@@ -31,7 +31,7 @@ jobs:
       DATABASE_URL: postgresql://taskmaster:taskmaster@127.0.0.1:5432/taskmaster_test?schema=public
       JWT_ACCESS_SECRET: ci-secret-that-is-longer-than-thirty-two-characters
       UPLOAD_DIR: ./tmp/test-uploads
-      LOG_LEVEL: silent
+      LOG_LEVEL: error
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

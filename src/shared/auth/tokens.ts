@@ -13,6 +13,7 @@ export const createAccessToken = (userId: string) =>
   new SignJWT({ type: "access" })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setSubject(userId)
+    .setJti(randomUUID())
     .setIssuer(issuer)
     .setAudience(audience)
     .setIssuedAt()

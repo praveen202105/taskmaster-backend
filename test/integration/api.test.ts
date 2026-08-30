@@ -71,7 +71,7 @@ describe("TaskMaster API", () => {
     expect(invalid.body.error).toMatchObject({ code: "VALIDATION_ERROR" });
     expect(invalid.body.error.requestId).toBeTypeOf("string");
 
-    const missing = await request(app).get("/api/v1/not-a-route");
+    const missing = await request(app).get("/not-a-route");
     expect(missing.status).toBe(404);
     expect(missing.body.error.code).toBe("ROUTE_NOT_FOUND");
   });
