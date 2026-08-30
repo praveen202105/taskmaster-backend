@@ -4,6 +4,7 @@ import type { Request, Response } from "express";
 
 import { prisma } from "../../config/database.js";
 import { env } from "../../config/env.js";
+import type { Prisma } from "../../generated/prisma/client.js";
 import { conflict, unauthorized } from "../../shared/errors/app-error.js";
 import { hashPassword, verifyPassword } from "../../shared/auth/password.js";
 import {
@@ -32,10 +33,11 @@ const issueSession = async (
   userId: string,
   context: SessionContext,
   familyId = createTokenFamilyId(),
+  database: typeof prisma | Prisma.TransactionClient = prisma,
 ) => {
   const rawToken = createRefreshToken();
   const sessionId = randomUUID();
-  await prisma.refreshSession.create({
+  await database.refreshSession.create({
     data: {
       id: sessionId,
       userId,
@@ -74,15 +76,20 @@ export const register = async (
   const existingUser = await prisma.user.findUnique({ where: { email: input.email } });
   if (existingUser) throw conflict("An account with this email already exists");
 
-  const user = await prisma.user.create({
-    data: {
-      email: input.email,
-      name: input.name,
-      passwordHash: await hashPassword(input.password),
-    },
-    select: publicUserSelect,
+  const passwordHash = await hashPassword(input.password);
+  const { user, session } = await prisma.$transaction(async (transaction) => {
+    const createdUser = await transaction.user.create({
+      data: { email: input.email, name: input.name, passwordHash },
+      select: publicUserSelect,
+    });
+    const createdSession = await issueSession(
+      createdUser.id,
+      sessionContext(request),
+      createTokenFamilyId(),
+      transaction,
+    );
+    return { user: createdUser, session: createdSession };
   });
-  const session = await issueSession(user.id, sessionContext(request));
   return { user, accessToken: await createAccessToken(user.id), refreshToken: session.rawToken };
 };
 

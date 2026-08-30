@@ -1,7 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { access, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { Router } from "express";
@@ -26,11 +26,24 @@ mkdirSync(temporaryDirectory, { recursive: true, mode: 0o700 });
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: temporaryDirectory,
+    destination: (_request, _file, callback) => {
+      mkdirSync(temporaryDirectory, { recursive: true, mode: 0o700 });
+      callback(null, temporaryDirectory);
+    },
     filename: (_request, _file, callback) => callback(null, randomUUID()),
   }),
   limits: { files: 1, fileSize: env.MAX_ATTACHMENT_BYTES },
 });
+
+const attachmentSelect = {
+  id: true,
+  taskId: true,
+  originalName: true,
+  mimeType: true,
+  size: true,
+  createdAt: true,
+  uploadedBy: { select: publicUserSelect },
+} as const;
 
 const inspectMimeType = async (temporaryPath: string, declaredMimeType: string) => {
   const declared = declaredMimeType.toLowerCase();
@@ -68,7 +81,7 @@ attachmentRouter.get(
     const attachments = await prisma.attachment.findMany({
       where: { taskId },
       orderBy: { createdAt: "asc" },
-      include: { uploadedBy: { select: publicUserSelect } },
+      select: attachmentSelect,
     });
     response.status(200).json({ data: attachments });
   },
@@ -99,7 +112,7 @@ attachmentRouter.post(
           mimeType,
           size: request.file.size,
         },
-        include: { uploadedBy: { select: publicUserSelect } },
+        select: attachmentSelect,
       });
       response.status(201).json({ data: attachment });
     } catch (error) {
@@ -118,14 +131,14 @@ attachmentRouter.get(
     const attachment = await prisma.attachment.findUnique({ where: { id: attachmentId } });
     if (!attachment) throw notFound("Attachment");
     await getTaskForMember(attachment.taskId, authenticatedUserId(request));
+    const filePath = localFileStorage.pathFor(attachment.storageKey);
+    try {
+      await access(filePath);
+    } catch {
+      throw notFound("Attachment content");
+    }
     response.type(attachment.mimeType);
-    response.download(
-      localFileStorage.pathFor(attachment.storageKey),
-      attachment.originalName,
-      (error) => {
-        if (error && !response.headersSent) response.destroy(error);
-      },
-    );
+    response.download(filePath, attachment.originalName);
   },
 );
 

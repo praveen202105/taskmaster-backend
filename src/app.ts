@@ -5,9 +5,11 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import { pinoHttp } from "pino-http";
+import swaggerUi from "swagger-ui-express";
 
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
+import { openApiDocument } from "./config/openapi.js";
 import { attachmentRouter } from "./modules/attachments/attachment.routes.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { commentRouter } from "./modules/comments/comment.routes.js";
@@ -35,7 +37,17 @@ export const createApp = () => {
       },
     }),
   );
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          "script-src": ["'self'", "'unsafe-inline'"],
+          "style-src": ["'self'", "'unsafe-inline'"],
+          "img-src": ["'self'", "data:"],
+        },
+      },
+    }),
+  );
   app.use(
     cors({
       credentials: true,
@@ -50,6 +62,9 @@ export const createApp = () => {
   app.use(cookieParser());
 
   if (env.NODE_ENV !== "test") app.use(apiRateLimit);
+
+  app.get("/openapi.json", (_request, response) => response.status(200).json(openApiDocument));
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openApiDocument, { explorer: true }));
 
   app.use("/api/v1/health", healthRouter);
   app.use("/api/v1/auth", authRouter);

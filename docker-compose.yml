@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: taskmaster
+      POSTGRES_USER: taskmaster
+      POSTGRES_PASSWORD: taskmaster
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskmaster -d taskmaster"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  migrate:
+    build:
+      context: .
+      target: dependencies
+    command: npm run db:migrate:deploy
+    environment:
+      DATABASE_URL: postgresql://taskmaster:taskmaster@postgres:5432/taskmaster?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://taskmaster:taskmaster@postgres:5432/taskmaster?schema=public
+      JWT_ACCESS_SECRET: local-compose-secret-change-before-production-123456
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+      UPLOAD_DIR: /app/uploads
+      TRUST_PROXY: 1
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - attachment-data:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  attachment-data:

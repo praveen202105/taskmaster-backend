@@ -10,7 +10,4 @@ export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
-export const normalizedEmailSchema = z
-  .email()
-  .max(320)
-  .transform((email) => email.trim().toLowerCase());
+export const normalizedEmailSchema = z.string().trim().toLowerCase().pipe(z.email().max(320));
