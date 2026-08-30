@@ -37,7 +37,7 @@ taskRouter.post(
   async (request, response) => {
     const userId = authenticatedUserId(request);
     const { projectId } = projectParams.parse(request.params);
-    const body = createTaskSchema.parse(request.body);
+    const body = request.body as z.infer<typeof createTaskSchema>;
     const project = await getProjectForMember(projectId, userId);
     await ensureTeamAssignee(project.teamId, body.assigneeId);
     const task = await prisma.task.create({
@@ -103,7 +103,7 @@ taskRouter.patch(
   async (request, response) => {
     const userId = authenticatedUserId(request);
     const { taskId } = taskParams.parse(request.params);
-    const body = updateTaskSchema.parse(request.body);
+    const body = request.body as z.infer<typeof updateTaskSchema>;
     const { task, membership } = await getTaskForMember(taskId, userId);
     const onlyStatus = Object.keys(body).every((key) => key === "status");
     const manager = canManageTask(userId, task.createdById, membership.role);
