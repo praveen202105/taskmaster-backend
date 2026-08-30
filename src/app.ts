@@ -8,7 +8,12 @@ import { pinoHttp } from "pino-http";
 
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
+import { authRouter } from "./modules/auth/auth.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
+import { invitationRouter } from "./modules/invitations/invitation.routes.js";
+import { projectRouter } from "./modules/projects/project.routes.js";
+import { teamRouter } from "./modules/teams/team.routes.js";
+import { userRouter } from "./modules/users/user.routes.js";
 import { errorHandler, notFoundHandler } from "./shared/http/error-handler.js";
 import { apiRateLimit } from "./shared/http/rate-limit.js";
 
@@ -44,6 +49,11 @@ export const createApp = () => {
   if (env.NODE_ENV !== "test") app.use(apiRateLimit);
 
   app.use("/api/v1/health", healthRouter);
+  app.use("/api/v1/auth", authRouter);
+  app.use("/api/v1/users", userRouter);
+  app.use("/api/v1/teams", teamRouter);
+  app.use("/api/v1/invitations", invitationRouter);
+  app.use("/api/v1", projectRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
