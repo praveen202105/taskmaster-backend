@@ -91,7 +91,7 @@ describe("HTTP security and error handling", () => {
     const next = vi.fn();
     await requireAuth({ headers: { authorization: "Bearer " } } as never, {} as never, next);
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
-    expect(() => authenticatedUserId({} as Express.Request)).toThrow("Authentication is required");
+    expect(() => authenticatedUserId({})).toThrow("Authentication is required");
   });
 
   it.each([
