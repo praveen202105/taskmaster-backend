@@ -8,11 +8,14 @@ import { pinoHttp } from "pino-http";
 
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
+import { attachmentRouter } from "./modules/attachments/attachment.routes.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
+import { commentRouter } from "./modules/comments/comment.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
 import { invitationRouter } from "./modules/invitations/invitation.routes.js";
 import { projectRouter } from "./modules/projects/project.routes.js";
 import { teamRouter } from "./modules/teams/team.routes.js";
+import { taskRouter } from "./modules/tasks/task.routes.js";
 import { userRouter } from "./modules/users/user.routes.js";
 import { errorHandler, notFoundHandler } from "./shared/http/error-handler.js";
 import { apiRateLimit } from "./shared/http/rate-limit.js";
@@ -54,6 +57,9 @@ export const createApp = () => {
   app.use("/api/v1/teams", teamRouter);
   app.use("/api/v1/invitations", invitationRouter);
   app.use("/api/v1", projectRouter);
+  app.use("/api/v1", taskRouter);
+  app.use("/api/v1", commentRouter);
+  app.use("/api/v1", attachmentRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

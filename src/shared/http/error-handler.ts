@@ -22,6 +22,8 @@ export const errorHandler: ErrorRequestHandler = (error: unknown, request, respo
       "ATTACHMENT_TOO_LARGE",
       "Attachment exceeds the maximum size",
     );
+  } else if (error instanceof multer.MulterError) {
+    normalizedError = new AppError(400, "UPLOAD_ERROR", error.message);
   } else if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
     normalizedError = new AppError(409, "CONFLICT", "A resource with these values already exists");
   } else if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {

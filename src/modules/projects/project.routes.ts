@@ -5,6 +5,7 @@ import { prisma } from "../../config/database.js";
 import { authenticatedUserId, requireAuth } from "../../shared/auth/auth.middleware.js";
 import { idParamsSchema } from "../../shared/http/schemas.js";
 import { validate } from "../../shared/http/validate.js";
+import { removeAttachmentFiles } from "../attachments/attachment.cleanup.js";
 import { createProjectSchema, updateProjectSchema } from "./project.schemas.js";
 import { getProjectForManager, getProjectForMember } from "./project.authorization.js";
 import { getTeamMembership, requireTeamManager } from "../teams/team.authorization.js";
@@ -78,7 +79,12 @@ projectRouter.delete(
   async (request, response) => {
     const { projectId } = projectParams.parse(request.params);
     await getProjectForManager(projectId, authenticatedUserId(request));
+    const attachments = await prisma.attachment.findMany({
+      where: { task: { projectId } },
+      select: { storageKey: true },
+    });
     await prisma.project.delete({ where: { id: projectId } });
+    await removeAttachmentFiles(attachments.map(({ storageKey }) => storageKey));
     response.status(204).send();
   },
 );

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { z } from "zod";
 
 import { prisma } from "../../config/database.js";
 import { TeamRole } from "../../generated/prisma/enums.js";
@@ -7,14 +8,13 @@ import { conflict, forbidden, notFound } from "../../shared/errors/app-error.js"
 import { idParamsSchema } from "../../shared/http/schemas.js";
 import { validate } from "../../shared/http/validate.js";
 import { publicUserSelect } from "../../shared/serialization/user.js";
+import { removeAttachmentFiles } from "../attachments/attachment.cleanup.js";
 import { createInvitationSchema, createTeamSchema, updateTeamSchema } from "./team.schemas.js";
 import { getTeamMembership, requireTeamManager, requireTeamOwner } from "./team.authorization.js";
 
 const teamParams = idParamsSchema("teamId");
 const memberParams = teamParams.extend({ userId: z.uuid() });
 const invitationParams = teamParams.extend({ invitationId: z.uuid() });
-
-import { z } from "zod";
 
 export const teamRouter = Router();
 teamRouter.use(requireAuth);
@@ -76,7 +76,12 @@ teamRouter.patch(
 teamRouter.delete("/:teamId", validate({ params: teamParams }), async (request, response) => {
   const { teamId } = teamParams.parse(request.params);
   await requireTeamOwner(teamId, authenticatedUserId(request));
+  const attachments = await prisma.attachment.findMany({
+    where: { task: { project: { teamId } } },
+    select: { storageKey: true },
+  });
   await prisma.team.delete({ where: { id: teamId } });
+  await removeAttachmentFiles(attachments.map(({ storageKey }) => storageKey));
   response.status(204).send();
 });
 
@@ -110,7 +115,13 @@ teamRouter.delete(
     if (actor.role === TeamRole.ADMIN && target.role === TeamRole.ADMIN && !removingSelf) {
       throw forbidden("Administrators cannot remove other administrators");
     }
-    await prisma.teamMember.delete({ where: { teamId_userId: { teamId, userId: targetUserId } } });
+    await prisma.$transaction([
+      prisma.task.updateMany({
+        where: { assigneeId: targetUserId, project: { teamId } },
+        data: { assigneeId: null },
+      }),
+      prisma.teamMember.delete({ where: { teamId_userId: { teamId, userId: targetUserId } } }),
+    ]);
     response.status(204).send();
   },
 );
@@ -130,6 +141,10 @@ teamRouter.post(
       where: { teamId, user: { email: body.email } },
     });
     if (existingMember) throw conflict("This user is already a team member");
+    await prisma.teamInvitation.updateMany({
+      where: { teamId, email: body.email, status: "PENDING", expiresAt: { lte: new Date() } },
+      data: { status: "EXPIRED" },
+    });
     const pending = await prisma.teamInvitation.findFirst({
       where: { teamId, email: body.email, status: "PENDING", expiresAt: { gt: new Date() } },
     });

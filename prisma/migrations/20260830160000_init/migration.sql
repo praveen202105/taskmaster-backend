@@ -135,6 +135,7 @@ CREATE INDEX "teams_owner_id_idx" ON "teams"("owner_id");
 CREATE INDEX "team_members_user_id_idx" ON "team_members"("user_id");
 CREATE INDEX "team_invitations_email_status_idx" ON "team_invitations"("email", "status");
 CREATE INDEX "team_invitations_team_id_status_idx" ON "team_invitations"("team_id", "status");
+CREATE UNIQUE INDEX "team_invitations_pending_unique" ON "team_invitations"("team_id", "email") WHERE "status" = 'PENDING';
 CREATE UNIQUE INDEX "projects_team_id_name_key" ON "projects"("team_id", "name");
 CREATE INDEX "projects_created_by_id_idx" ON "projects"("created_by_id");
 CREATE INDEX "tasks_project_id_status_idx" ON "tasks"("project_id", "status");
