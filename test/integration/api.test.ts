@@ -7,6 +7,7 @@ import { createApp } from "../../src/app.js";
 import { prisma } from "../../src/config/database.js";
 
 const app = createApp();
+const nonexistentId = "00000000-0000-4000-8000-000000000001";
 
 const cleanDatabase = async () => {
   await prisma.$transaction([
@@ -231,6 +232,10 @@ describe("TaskMaster API", () => {
       .get(`/api/v1/teams/${teamId}`)
       .set(bearer(outsider.accessToken));
     expect(outsiderTeam.status).toBe(403);
+    await ownerAgent
+      .get(`/api/v1/teams/${nonexistentId}`)
+      .set(bearer(owner.accessToken))
+      .expect(404);
 
     const adminInvitation = await ownerAgent
       .post(`/api/v1/teams/${teamId}/invitations`)
@@ -283,6 +288,38 @@ describe("TaskMaster API", () => {
       .set(bearer(outsider.accessToken));
     expect(acceptDeclined.status).toBe(409);
 
+    const expiredInvitation = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(owner.accessToken))
+      .send({ email: outsider.user.email });
+    const expiredInvitationId = expiredInvitation.body.data.id as string;
+    await ownerAgent
+      .post(`/api/v1/invitations/${expiredInvitationId}/accept`)
+      .set(bearer(owner.accessToken))
+      .expect(404);
+    await prisma.teamInvitation.update({
+      where: { id: expiredInvitationId },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await outsiderAgent
+      .post(`/api/v1/invitations/${expiredInvitationId}/accept`)
+      .set(bearer(outsider.accessToken))
+      .expect(409);
+
+    const revokedInvitation = await ownerAgent
+      .post(`/api/v1/teams/${teamId}/invitations`)
+      .set(bearer(owner.accessToken))
+      .send({ email: "future-member@example.com" });
+    const revokedInvitationId = revokedInvitation.body.data.id as string;
+    await ownerAgent
+      .delete(`/api/v1/teams/${teamId}/invitations/${revokedInvitationId}`)
+      .set(bearer(owner.accessToken))
+      .expect(204);
+    await ownerAgent
+      .delete(`/api/v1/teams/${teamId}/invitations/${revokedInvitationId}`)
+      .set(bearer(owner.accessToken))
+      .expect(404);
+
     const memberCannotUpdateTeam = await memberAgent
       .patch(`/api/v1/teams/${teamId}`)
       .set(bearer(member.accessToken))
@@ -308,6 +345,15 @@ describe("TaskMaster API", () => {
       .get(`/api/v1/projects/${projectId}`)
       .set(bearer(member.accessToken))
       .expect(200);
+    await ownerAgent
+      .get(`/api/v1/projects/${nonexistentId}`)
+      .set(bearer(owner.accessToken))
+      .expect(404);
+    await ownerAgent
+      .patch(`/api/v1/projects/${nonexistentId}`)
+      .set(bearer(owner.accessToken))
+      .send({ name: "Missing project" })
+      .expect(404);
     const memberCannotCreateProject = await memberAgent
       .post(`/api/v1/teams/${teamId}/projects`)
       .set(bearer(member.accessToken))
@@ -327,9 +373,17 @@ describe("TaskMaster API", () => {
       .delete(`/api/v1/teams/${teamId}/members/${owner.user.id}`)
       .set(bearer(member.accessToken));
     expect(cannotRemoveOwner.status).toBe(403);
+    const memberCannotRemoveAdmin = await memberAgent
+      .delete(`/api/v1/teams/${teamId}/members/${admin.user.id}`)
+      .set(bearer(member.accessToken));
+    expect(memberCannotRemoveAdmin.status).toBe(403);
 
     await adminAgent
       .delete(`/api/v1/projects/${projectId}`)
+      .set(bearer(admin.accessToken))
+      .expect(204);
+    await adminAgent
+      .delete(`/api/v1/teams/${teamId}/members/${admin.user.id}`)
       .set(bearer(admin.accessToken))
       .expect(204);
     const memberCannotDeleteTeam = await memberAgent
@@ -405,6 +459,10 @@ describe("TaskMaster API", () => {
       .set(bearer(owner.accessToken));
     expect(projectTasks.body.data).toHaveLength(1);
     await ownerAgent.get(`/api/v1/tasks/${taskId}`).set(bearer(owner.accessToken)).expect(200);
+    await ownerAgent
+      .get(`/api/v1/tasks/${nonexistentId}`)
+      .set(bearer(owner.accessToken))
+      .expect(404);
 
     const invalidAssignee = await ownerAgent
       .patch(`/api/v1/tasks/${taskId}`)
@@ -472,6 +530,11 @@ describe("TaskMaster API", () => {
       .set(bearer(member.accessToken));
     expect(forbiddenCommentDelete.status).toBe(403);
     await ownerAgent
+      .patch(`/api/v1/comments/${nonexistentId}`)
+      .set(bearer(owner.accessToken))
+      .send({ body: "Missing comment" })
+      .expect(404);
+    await ownerAgent
       .delete(`/api/v1/comments/${ownerComment.body.data.id as string}`)
       .set(bearer(owner.accessToken))
       .expect(204);
@@ -488,6 +551,38 @@ describe("TaskMaster API", () => {
         contentType: "application/octet-stream",
       });
     expect(unsupportedAttachment.status).toBe(415);
+    const mismatchedAttachment = await memberAgent
+      .post(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(member.accessToken))
+      .attach("file", Buffer.from("%PDF-1.4\n% test document", "utf8"), {
+        filename: "not-really-an-image.png",
+        contentType: "image/png",
+      });
+    expect(mismatchedAttachment.status).toBe(415);
+    const invalidTextAttachment = await memberAgent
+      .post(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(member.accessToken))
+      .attach("file", Buffer.from([0xff, 0xfe, 0xfd]), {
+        filename: "invalid.txt",
+        contentType: "text/plain",
+      });
+    expect(invalidTextAttachment.status).toBe(415);
+    const unexpectedFileField = await memberAgent
+      .post(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(member.accessToken))
+      .attach("unexpected", Buffer.from("evidence", "utf8"), {
+        filename: "evidence.txt",
+        contentType: "text/plain",
+      });
+    expect(unexpectedFileField.status).toBe(400);
+    const oversizedAttachment = await memberAgent
+      .post(`/api/v1/tasks/${taskId}/attachments`)
+      .set(bearer(member.accessToken))
+      .attach("file", Buffer.alloc(10 * 1024 * 1024 + 1), {
+        filename: "too-large.txt",
+        contentType: "text/plain",
+      });
+    expect(oversizedAttachment.status).toBe(413);
 
     const attachmentResponse = await memberAgent
       .post(`/api/v1/tasks/${taskId}/attachments`)
@@ -498,6 +593,10 @@ describe("TaskMaster API", () => {
       });
     expect(attachmentResponse.status).toBe(201);
     const attachmentId = attachmentResponse.body.data.id as string;
+    await ownerAgent
+      .get(`/api/v1/attachments/${nonexistentId}/content`)
+      .set(bearer(owner.accessToken))
+      .expect(404);
 
     const attachmentList = await ownerAgent
       .get(`/api/v1/tasks/${taskId}/attachments`)

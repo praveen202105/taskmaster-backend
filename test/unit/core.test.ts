@@ -2,17 +2,21 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import multer from "multer";
+import { describe, expect, it, vi } from "vitest";
 
+import { Prisma } from "../../src/generated/prisma/client.js";
 import { loginSchema, registerSchema } from "../../src/modules/auth/auth.schemas.js";
 import { LocalFileStorage } from "../../src/modules/attachments/local-file.storage.js";
 import { createTaskSchema, taskListQuerySchema } from "../../src/modules/tasks/task.schemas.js";
+import { authenticatedUserId, requireAuth } from "../../src/shared/auth/auth.middleware.js";
 import { hashPassword, verifyPassword } from "../../src/shared/auth/password.js";
 import {
   createAccessToken,
   hashRefreshToken,
   verifyAccessToken,
 } from "../../src/shared/auth/tokens.js";
+import { errorHandler } from "../../src/shared/http/error-handler.js";
 
 describe("security primitives", () => {
   it("hashes and verifies passwords using Argon2id", async () => {
@@ -79,5 +83,53 @@ describe("local attachment storage", () => {
     await storage.remove(storageKey);
     await expect(readFile(storage.pathFor(storageKey))).rejects.toMatchObject({ code: "ENOENT" });
     await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("HTTP security and error handling", () => {
+  it("rejects an empty bearer token and an unauthenticated request context", async () => {
+    const next = vi.fn();
+    await requireAuth({ headers: { authorization: "Bearer " } } as never, {} as never, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
+    expect(() => authenticatedUserId({} as Express.Request)).toThrow("Authentication is required");
+  });
+
+  it.each([
+    [new multer.MulterError("LIMIT_FILE_SIZE"), 413, "ATTACHMENT_TOO_LARGE"],
+    [new multer.MulterError("LIMIT_UNEXPECTED_FILE"), 400, "UPLOAD_ERROR"],
+    [
+      new Prisma.PrismaClientKnownRequestError("duplicate", {
+        code: "P2002",
+        clientVersion: "test",
+      }),
+      409,
+      "CONFLICT",
+    ],
+    [
+      new Prisma.PrismaClientKnownRequestError("missing", {
+        code: "P2025",
+        clientVersion: "test",
+      }),
+      404,
+      "NOT_FOUND",
+    ],
+    [new Error("database credentials must stay private"), 500, "INTERNAL_ERROR"],
+  ])("normalizes %s without leaking implementation details", (error, status, code) => {
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    };
+    const request = { id: "request-id", log: { error: vi.fn() } };
+
+    errorHandler(error, request as never, response as never, vi.fn());
+
+    expect(response.status).toHaveBeenCalledWith(status);
+    expect(response.json).toHaveBeenCalledWith({
+      error: expect.objectContaining({ code, requestId: "request-id" }),
+    });
+    if (status === 500) {
+      expect(JSON.stringify(response.json.mock.calls[0]![0])).not.toContain("database credentials");
+      expect(request.log.error).toHaveBeenCalledOnce();
+    }
   });
 });
